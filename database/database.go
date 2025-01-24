@@ -6,8 +6,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 
-	"final/daterules"
+	"go_final/daterules"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -16,14 +17,6 @@ const (
 	dbFile = "scheduler.db"
 	limit  = 50
 )
-
-type TaskContainer struct {
-	db *sql.DB
-}
-
-func NewContainer(db *sql.DB) TaskContainer {
-	return TaskContainer{db: db}
-}
 
 func DBInit() *sql.DB {
 	appPath, err := os.Executable()
@@ -61,31 +54,32 @@ func DBInit() *sql.DB {
 		}
 		log.Println("Database creation success!")
 	}
+
 	return db
 }
 
-func (t TaskContainer) AddEntry(task daterules.Task) (int64, error) {
+func AddEntry(db *sql.DB, task daterules.Task) (string, error) {
 	AddEntry := `INSERT INTO scheduler (date, title, comment, repeat) 
 	VALUES (:date, :title, :comment, :repeat)`
-	result, err := t.db.Exec(AddEntry,
+	result, err := db.Exec(AddEntry,
 		sql.Named("date", task.Date),
 		sql.Named("title", task.Title),
 		sql.Named("comment", task.Comment),
 		sql.Named("repeat", task.Repeat))
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 	idb, err := result.LastInsertId()
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 
-	return idb, nil
+	return strconv.Itoa(int(idb)), nil
 }
 
-func (t TaskContainer) DeleteEntry(id string) error {
+func DeleteEntry(db *sql.DB, id string) error {
 	DeleteEntry := `DELETE FROM scheduler WHERE id = ?`
-	result, err := t.db.Exec(DeleteEntry, id)
+	result, err := db.Exec(DeleteEntry, id)
 	if err != nil {
 		return err
 	}
@@ -100,12 +94,12 @@ func (t TaskContainer) DeleteEntry(id string) error {
 	return nil
 }
 
-func (t TaskContainer) EditEntry(task daterules.Task) error {
+func EditEntry(db *sql.DB, task daterules.Task) error {
 	EditEntry := `UPDATE scheduler 
 	SET date = ?, title = ?, comment = ?, repeat = ? 
 	WHERE id = ?;
 	`
-	result, err := t.db.Exec(EditEntry,
+	result, err := db.Exec(EditEntry,
 		task.Date,
 		task.Title,
 		task.Comment,
@@ -125,52 +119,44 @@ func (t TaskContainer) EditEntry(task daterules.Task) error {
 	return nil
 }
 
-func (t TaskContainer) GetEntry(id string) (*sql.Row, error) {
+func GetEntry(db *sql.DB, id string) (daterules.Task, error) {
 	GetEntry := `SELECT id, date, title, comment, repeat 
 	FROM scheduler WHERE id = ?`
-	row := t.db.QueryRow(GetEntry, id)
+	row := db.QueryRow(GetEntry, id)
 	var entry daterules.Task
 	err := row.Scan(&entry.ID, &entry.Date, &entry.Title, &entry.Comment, &entry.Repeat)
 	if err != nil {
-		panic(err)
+		return daterules.Task{}, err
 	}
 
-	return row, nil
+	return entry, nil
 }
 
-func (t TaskContainer) GetAllEntries() ([]daterules.Task, error) {
-	var entries []daterules.Task
+func GetAllEntries(db *sql.DB) ([]daterules.Task, error) {
 	GetAllEntries := `SELECT id, date, title, comment, repeat 
 	FROM scheduler 
 	WHERE date >= strftime('%Y %m %d', 'now') 
 	ORDER BY date ASC 
-	LIMIT ?
+	LIMIT ?;
 	`
-	rows, err := t.db.Query(GetAllEntries, limit)
+	rows, err := db.Query(GetAllEntries, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	entries := []daterules.Task{}
 	for rows.Next() {
-		var task daterules.Task
-		err := rows.Scan(&task.ID, &task.Date, &task.Title, &task.Comment, &task.Repeat)
+		var entry daterules.Task
+		err := rows.Scan(&entry.ID, &entry.Date, &entry.Title, &entry.Comment, &entry.Repeat)
 		if err != nil {
 			return nil, errors.New("database error")
 		}
-		entries = append(entries, task)
+		entries = append(entries, entry)
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
+
 	return entries, nil
-}
-
-func (t TaskContainer) CountEntries() (int, error) {
-	var count int64
-
-	row := t.db.QueryRow("SELECT count(*) FROM scheduler")
-	_ = row.Scan(&count)
-
-	return int(count), nil
 }
