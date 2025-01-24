@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"final/database"
-	"final/daterules"
+	"go_final/database"
+	"go_final/daterules"
 
 	_ "github.com/mattn/go-sqlite3"
 )

@@ -1,4 +1,4 @@
-module final
+module go_final
 
 go 1.23.4
 

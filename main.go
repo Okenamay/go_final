@@ -6,8 +6,8 @@ import (
 	"log"
 	"net/http"
 
-	"final/database"
-	"final/handler"
+	"go_final/database"
+	"go_final/handler"
 
 	"github.com/go-chi/chi/v5"
 	_ "github.com/mattn/go-sqlite3"

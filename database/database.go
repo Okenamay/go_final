@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"final/daterules"
+	"go_final/daterules"
 
 	_ "github.com/mattn/go-sqlite3"
 )
