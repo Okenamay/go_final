@@ -1,11 +1,11 @@
 package handler
 
 import (
-	"bytes"
+	"database/sql"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"io"
 	"net/http"
-	"strconv"
 	"time"
 
 	"final/database"
@@ -14,261 +14,281 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+type Id struct {
+	Id string `json:"id"`
+}
+
+type Err struct {
+	Error string `json:"error"`
+}
+
+func (err Err) Bytes() []byte {
+	data, _ := json.Marshal(err)
+	return data
+}
+
+type TasksRes struct {
+	Tasks []daterules.Task `json:"tasks"`
+}
+
 var (
 	TimeFormat string = daterules.TimeFormat
 )
 
-type TaskService struct {
-	service database.TaskContainer
+type Handler struct {
+	DB *sql.DB
 }
 
-func NewTaskService(store database.TaskContainer) TaskService {
-	return TaskService{service: store}
-}
-
-func (t TaskService) Task(w http.ResponseWriter, r *http.Request) {
-	var task daterules.Task
-	var buf bytes.Buffer
-	var date time.Time
-
-	if r.Method == http.MethodGet {
-		t.service.GetAllEntries()
-		return
-	} else if r.Method == http.MethodDelete {
-		t.DeleteTask(w, r)
-		return
+func NewHandler(db *sql.DB) *Handler {
+	return &Handler{
+		DB: db,
 	}
+}
 
-	now, _ := time.Parse(TimeFormat, time.Now().Format(TimeFormat))
-
-	_, err := buf.ReadFrom(r.Body)
+func taskFromReq(bytes []byte) (daterules.Task, error) {
+	var t daterules.Task
+	err := json.Unmarshal(bytes, &t)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		return daterules.Task{}, err
 	}
 
-	if err = json.Unmarshal(buf.Bytes(), &task); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	if t.Title == "" {
+		return daterules.Task{}, errors.New("no title specified")
 	}
 
-	if task.Title == "" {
-		callError("Не указан заголовок задачи", w)
-		return
-	}
+	y, m, d := time.Now().Date()
+	nowDate := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 
-	if task.Date == "" {
-		task.Date = time.Now().Format(TimeFormat)
-		date, _ = time.Parse(TimeFormat, time.Now().Format(TimeFormat))
+	var taskDate time.Time
+	if t.Date == "" || t.Date == "today" {
+		taskDate = nowDate
 	} else {
-		date, err = time.Parse(TimeFormat, task.Date)
+		taskDate, err = time.Parse(TimeFormat, t.Date)
 		if err != nil {
-			callError("неверный формат даты", w)
-			return
+			return daterules.Task{}, err
 		}
-	}
 
-	if now.After(date) {
-		if task.Repeat == "" {
-			task.Date = time.Now().Format(TimeFormat)
-		} else {
-			task.Date, err = daterules.NextTime(time.Now(), task.Date, task.Repeat)
+		for taskDate.Before(nowDate) {
+			taskDate, err = daterules.NextTime(nowDate, "", t.Repeat)
 			if err != nil {
-				callError("неверный формат", w)
-				return
+				return daterules.Task{}, err
 			}
 		}
 	}
-	if r.Method == http.MethodPut {
-		t.EditTask(w, r, task)
+
+	t.Date = taskDate.Format(daterules.TimeFormat)
+
+	return t, nil
+}
+
+func (h *Handler) GetTask(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		w.Write(Err{Error: "no id specified"}.Bytes())
 		return
 	}
 
-	id, err := t.service.AddEntry(task)
+	task, err := database.GetEntry(h.DB, id)
 	if err != nil {
-		callError("Ошибка базы данных", w)
+		w.Write(Err{Error: err.Error()}.Bytes())
 		return
 	}
 
-	resp, err := json.Marshal(map[string]string{"id": strconv.Itoa(int(id))})
+	response, err := json.Marshal(task)
 	if err != nil {
-		callError("не получилось создать напоминание", w)
+		w.Write(Err{Error: err.Error()}.Bytes())
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(resp)
-
+	w.Write(response)
 }
 
-func (t TaskService) GetTasks(w http.ResponseWriter, r *http.Request) {
-	tasks := []daterules.Task{}
-
-	count, err := t.service.CountEntries()
+func (h *Handler) AddTask(w http.ResponseWriter, r *http.Request) {
+	bytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		callError("Ошибка базы данных", w)
+		w.Write(Err{Error: err.Error()}.Bytes())
 		return
 	}
 
-	if count > 0 {
-		tasks, err = t.service.GetAllEntries()
-		if err != nil {
-			callError("Оошибка базы данных", w)
-			return
-		}
-	}
-	resp, err := json.Marshal(map[string]interface{}{
-		"tasks": tasks,
-	})
+	t, err := taskFromReq(bytes)
 	if err != nil {
-		callError("Ошибка десериализации JSON", w)
+		w.Write(Err{Error: err.Error()}.Bytes())
+		return
 	}
+
+	id, err := database.AddEntry(h.DB, t)
+	if err != nil {
+		w.Write(Err{Error: err.Error()}.Bytes())
+		return
+	}
+
+	res := Id{
+		Id: id,
+	}
+
+	response, err := json.Marshal(res)
+	if err != nil {
+		w.Write(Err{Error: err.Error()}.Bytes())
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(resp)
-
+	w.Write(response)
 }
 
-func NextDeadLine(w http.ResponseWriter, r *http.Request) {
-	now, err := time.Parse(TimeFormat, r.URL.Query().Get("now"))
+func (h *Handler) EditTask(w http.ResponseWriter, r *http.Request) {
+	bytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	date := r.URL.Query().Get("date")
-	repeat := r.URL.Query().Get("repeat")
-
-	deadline, err := daterules.NextTime(now, date, repeat)
-	if err != nil {
-		fmt.Fprint(w, err)
+		w.Write(Err{Error: err.Error()}.Bytes())
 		return
 	}
 
-	_, _ = w.Write([]byte(deadline))
+	t, err := taskFromReq(bytes)
+	if err != nil {
+		w.Write(Err{Error: err.Error()}.Bytes())
+		return
+	}
 
+	err = database.EditEntry(h.DB, t)
+	if err != nil {
+		w.Write(Err{Error: err.Error()}.Bytes())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("{}"))
 }
 
-func (t TaskService) GetTaskByID(w http.ResponseWriter, r *http.Request) {
-	var task daterules.Task
-
-	id := r.FormValue("id")
-	row, err := t.service.GetEntry(id)
-	if err != nil {
-		callError("Ошибка базы данных", w)
+func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		w.Write(Err{Error: "task id is not set"}.Bytes())
 		return
 	}
 
-	err = row.Scan(&task.ID, &task.Date, &task.Title, &task.Comment, &task.Repeat)
+	err := database.DeleteEntry(h.DB, id)
 	if err != nil {
-		callError("Задача не найдена", w)
+		w.Write(Err{Error: err.Error()}.Bytes())
 		return
 	}
 
-	resp, err := json.Marshal(map[string]string{
-		"id":      task.ID,
-		"date":    task.Date,
-		"title":   task.Title,
-		"comment": task.Comment,
-		"repeat":  task.Repeat,
-	})
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.Write([]byte("{}"))
+}
+
+func (h *Handler) GetAllTasks(w http.ResponseWriter, r *http.Request) {
+	tasks, err := database.GetAllEntries(h.DB)
 	if err != nil {
-		callError("ошибка десериализации JSON", w)
+		w.Write(Err{Error: err.Error()}.Bytes())
+		return
 	}
+
+	res := TasksRes{
+		Tasks: tasks,
+	}
+
+	resp, err := json.Marshal(res)
+	if err != nil {
+		w.Write(Err{Error: err.Error()}.Bytes())
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write(resp)
 }
 
-func (t TaskService) EditTask(w http.ResponseWriter, h *http.Request, task daterules.Task) {
-	var checkerrortask daterules.Task
-	row, _ := t.service.GetEntry(task.ID)
-	err := row.Scan(&checkerrortask.ID, &checkerrortask.Date, &checkerrortask.Title, &checkerrortask.Comment, &checkerrortask.Repeat)
-	if err != nil {
-		callError("задача не найдена", w)
+func (h *Handler) GetNextDate(w http.ResponseWriter, r *http.Request) {
+	now := r.URL.Query().Get("now")
+	if now == "" {
+		w.Write([]byte{})
 		return
-
 	}
-	err = t.service.EditEntry(task)
-	if err != nil {
-		callError("ошибка подключения к базе данных", w)
+
+	date := r.URL.Query().Get("date")
+	if date == "" {
+		w.Write([]byte{})
 		return
+	}
+
+	repeat := r.URL.Query().Get("repeat")
+	if repeat == "" {
+		w.Write([]byte{})
+		return
+	}
+
+	taskDate, err := time.Parse(TimeFormat, date)
+	if err != nil {
+		w.Write([]byte{})
+		return
+	}
+
+	nowDate, err := time.Parse(TimeFormat, now)
+	if err != nil {
+		w.Write([]byte{})
+		return
+	}
+
+	resultT, err := daterules.NextTime(taskDate, "", repeat)
+	if err != nil {
+		w.Write([]byte{})
+		return
+	}
+
+	for taskDate.Before(nowDate) {
+		taskDate, err = daterules.NextTime(taskDate, "", repeat)
+		if err != nil {
+			w.Write([]byte{})
+			return
+		}
+
+		resultT = taskDate
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	_, _ = w.Write([]byte("{}"))
-
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(resultT.Format(TimeFormat)))
 }
 
-func (t TaskService) DoneTask(w http.ResponseWriter, r *http.Request) {
-	var task daterules.Task
-
-	now, _ := time.Parse(TimeFormat, time.Now().Format(TimeFormat))
-
-	id := r.FormValue("id")
-	row, err := t.service.GetEntry(id)
-	if err != nil {
-		callError("Ошибка базы данных", w)
+func (h *Handler) SetTaskDone(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		w.Write(Err{Error: "task id is not set"}.Bytes())
 		return
 	}
 
-	err = row.Scan(&task.ID, &task.Date, &task.Title, &task.Comment, &task.Repeat)
+	task, err := database.GetEntry(h.DB, id)
 	if err != nil {
-		callError("Задача не найдена", w)
+		w.Write(Err{Error: err.Error()}.Bytes())
 		return
 	}
 
 	if task.Repeat == "" {
-		err = t.service.DeleteEntry(task.ID)
+		err := database.DeleteEntry(h.DB, id)
 		if err != nil {
-			callError("не получилоось отметить задачу выполненной", w)
+			w.Write(Err{Error: err.Error()}.Bytes())
 			return
 		}
-		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
 		w.Write([]byte("{}"))
 		return
-	} else {
-		task.Date, err = daterules.NextTime(now, task.Date, task.Repeat)
-	}
-	if err != nil {
-		callError("не получилось найти следующую дату", w)
-		return
-	}
-	err = t.service.EditEntry(task)
-	if err != nil {
-		callError("не получилось обновить дату в задаче", w)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	_, _ = w.Write([]byte("{}"))
-}
-
-func (t TaskService) DeleteTask(w http.ResponseWriter, r *http.Request) {
-	var task daterules.Task
-
-	id := r.FormValue("id")
-	row, err := t.service.GetEntry(id)
-	if err != nil {
-		callError("Ошибка базы данных", w)
-		return
 	}
 
-	err = row.Scan(&task.ID, &task.Date, &task.Title, &task.Comment, &task.Repeat)
+	task.Date, err = task.NextDay()
 	if err != nil {
-		callError("Задача не найдена", w)
+		w.Write(Err{Error: err.Error()}.Bytes())
 		return
 	}
-
-	err = t.service.DeleteEntry(task.ID)
+	err = database.EditEntry(h.DB, task)
 	if err != nil {
-		callError("не получилось удалить задачу", w)
+		w.Write(Err{Error: err.Error()}.Bytes())
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	_, _ = w.Write([]byte("{}"))
-}
-
-func callError(txt string, w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	json.NewEncoder(w).Encode(map[string]string{"error": txt})
+	w.Write([]byte("{}"))
 }
