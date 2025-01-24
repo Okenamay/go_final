@@ -19,7 +19,7 @@ type Task struct {
 
 func NextTime(now time.Time, date string, repeat string) (string, error) {
 	if repeat == "" {
-		return "", errors.New("не указан параметр repeat")
+		return "", errors.New("no repeat parameter")
 	}
 
 	startDate, err := time.Parse(TimeFormat, date)
@@ -30,11 +30,11 @@ func NextTime(now time.Time, date string, repeat string) (string, error) {
 	parts := strings.Fields(repeat)
 
 	if !strings.Contains("yd", parts[0]) {
-		return "", errors.New("неправильный формат повтора")
+		return "", errors.New("wrong repeat format")
 	} else if parts[0] == "d" && len(parts) != 2 {
-		return "", errors.New("неверный формат времени повтора")
+		return "", errors.New("wrong repeat time format")
 	} else if parts[0] == "y" && len(parts) != 1 {
-		return "", errors.New("неверный формат ежедневного повтора")
+		return "", errors.New("wrong daily repeat format")
 	}
 
 	for {
@@ -43,7 +43,7 @@ func NextTime(now time.Time, date string, repeat string) (string, error) {
 		} else if parts[0] == "d" {
 			part, err := strconv.Atoi(parts[1])
 			if part > 366 || part <= 0 || err != nil {
-				return "", errors.New("неверное время повтора")
+				return "", errors.New("wrong repeat time")
 			}
 			startDate = startDate.AddDate(0, 0, part)
 		}
